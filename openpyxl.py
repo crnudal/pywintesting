@@ -1,4 +1,3 @@
-import re
 import csv
 import shutil
 from pathlib import Path
@@ -13,13 +12,11 @@ RECURSIVE = True
 DRY_RUN = False              # True = no files saved, report still generated
 MAKE_BACKUP = True           # True = copy original to *.bak_<timestamp>
 
-REPORT_CSV = "timestamp_replacements_report.csv"
+REPORT_CSV = "format_string_replacements_report.csv"
 
-# Match: yyyyMMdd-HH:mm:ss.SSSSSS  (6 fractional digits)
-# Replace to: yyyyMMdd-HH:mm:ss.SSSSSSSSS (9 fractional digits) by padding "000"
-TS_REGEX = re.compile(r"(\d{8}-\d{2}:\d{2}:\d{2})\.(\d{6})(?!\d)")
+FIND_TEXT = "yyyyMMdd-HH:mm:ss.SSSSSS"
+REPLACE_TEXT = "yyyyMMdd-HH:mm:ss.SSSSSSSSS"
 
-# Which file types to process
 PROCESS_XLSX = True
 PROCESS_XLS = True           # requires optional packages (see notes below)
 
@@ -32,22 +29,24 @@ def process_xlsx(path: Path):
     wb = load_workbook(path, data_only=False)
     file_changed = False
 
-    # Collect: (sheet_name, header_value, column_letter, num_cells_changed)
+    # Collect: (sheet_name, header_value, column_letter, num_occurrences_replaced)
     changes = []
 
     for ws in wb.worksheets:
-        col_change_counts = {}  # col_idx -> count
+        col_change_counts = {}  # col_idx -> replaced occurrences count (sum across cells)
 
-        # Iterate all cells (includes blanks; safe but can be slower for huge sheets)
         for row in ws.iter_rows():
             for cell in row:
                 v = cell.value
-                if isinstance(v, str) and v:
-                    new_v, n = TS_REGEX.subn(lambda m: f"{m.group(1)}.{m.group(2)}000", v)
-                    if n > 0 and new_v != v:
+                if isinstance(v, str) and v and FIND_TEXT in v:
+                    # Replace substring even if there is text before/after
+                    occurrences = v.count(FIND_TEXT)
+                    new_v = v.replace(FIND_TEXT, REPLACE_TEXT)
+
+                    if new_v != v:
                         cell.value = new_v
                         file_changed = True
-                        col_change_counts[cell.column] = col_change_counts.get(cell.column, 0) + n
+                        col_change_counts[cell.column] = col_change_counts.get(cell.column, 0) + occurrences
 
         # Map changed columns to row-1 header value
         for col_idx, cnt in sorted(col_change_counts.items()):
@@ -92,34 +91,28 @@ def process_xls(path: Path):
         wsheet = wbook.get_sheet(si)
         sheet_name = sheet.name
 
-        col_change_counts = {}  # col_idx (0-based) -> count
+        col_change_counts = {}  # col_idx (0-based) -> replaced occurrences count
 
-        # Note: xlrd uses 0-based rows/cols
         for r in range(sheet.nrows):
             for c in range(sheet.ncols):
                 cell = sheet.cell(r, c)
                 if cell.ctype == xlrd.XL_CELL_TEXT:
                     v = cell.value
-                    if v:
-                        new_v, n = TS_REGEX.subn(lambda m: f"{m.group(1)}.{m.group(2)}000", v)
-                        if n > 0 and new_v != v:
+                    if v and FIND_TEXT in v:
+                        occurrences = v.count(FIND_TEXT)
+                        new_v = v.replace(FIND_TEXT, REPLACE_TEXT)
+
+                        if new_v != v:
                             wsheet.write(r, c, new_v)
                             file_changed = True
-                            col_change_counts[c] = col_change_counts.get(c, 0) + n
+                            col_change_counts[c] = col_change_counts.get(c, 0) + occurrences
 
         # header in first row is row 0
         for c, cnt in sorted(col_change_counts.items()):
             header_cell = sheet.cell(0, c)
-            header_value = ""
-            if header_cell.ctype == xlrd.XL_CELL_TEXT:
-                header_value = header_cell.value
-            else:
-                # if it's numeric/date/etc, stringify safely
-                header_value = str(header_cell.value) if header_cell.value is not None else ""
-
-            # Excel-like column letter
+            header_value = str(header_cell.value) if header_cell.value is not None else ""
             col_letter = _col_letter(c + 1)
-            changes.append((sheet_name, str(header_value), col_letter, cnt))
+            changes.append((sheet_name, header_value, col_letter, cnt))
 
     if file_changed and not DRY_RUN:
         if MAKE_BACKUP:
@@ -201,14 +194,14 @@ def main():
                     "sheet": sheet_name,
                     "column_letter": col_letter,
                     "header_row1_value": header_value,
-                    "matches_replaced": cnt,
+                    "occurrences_replaced": cnt,
                 })
 
     # Write report
     if report_rows:
         with open(REPORT_CSV, "w", newline="", encoding="utf-8") as fp:
             writer = csv.DictWriter(fp, fieldnames=[
-                "file", "sheet", "column_letter", "header_row1_value", "matches_replaced"
+                "file", "sheet", "column_letter", "header_row1_value", "occurrences_replaced"
             ])
             writer.writeheader()
             writer.writerows(report_rows)
